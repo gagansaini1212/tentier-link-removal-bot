@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import re
@@ -27,6 +28,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).parent
+AUTO_CLEAN_DELAY_SECONDS = 300  # 5 minutes
 
 # Matches URLs, t.me / wa.me / bit.ly links, and domain.tld patterns
 LINK_REGEX = re.compile(
@@ -134,6 +136,23 @@ async def bot_can_delete(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> bo
         return False
 
 
+async def _delete_after_delay(
+    bot, chat_id: int, message_id: int, delay: int = AUTO_CLEAN_DELAY_SECONDS
+) -> None:
+    try:
+        await asyncio.sleep(delay)
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception as exc:
+        logger.debug("Auto-clean skipped for %s in %s: %s", message_id, chat_id, exc)
+
+
+def schedule_auto_clean(
+    bot, chat_id: int, message_id: int, delay: int = AUTO_CLEAN_DELAY_SECONDS
+) -> None:
+    """Schedule deletion of a message after delay seconds (default: 5 minutes)."""
+    asyncio.create_task(_delete_after_delay(bot, chat_id, message_id, delay))
+
+
 async def handle_my_chat_member(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -151,28 +170,51 @@ async def handle_my_chat_member(
     new_status = new_member.status
 
     if old_status in (ChatMember.LEFT, ChatMember.BANNED) and new_status == ChatMember.MEMBER:
-        await context.bot.send_message(
+        sent = await context.bot.send_message(
             chat_id=chat.id,
             text=(
                 "Admin access required: Please promote me to Group Admin with "
                 "'Delete Messages' permission so I can remove non-admin links."
             ),
         )
+        schedule_auto_clean(context.bot, chat.id, sent.message_id)
     elif new_status == ChatMember.ADMINISTRATOR:
         can_del = bool(getattr(new_member, "can_delete_messages", False))
         if not can_del:
-            await context.bot.send_message(
+            sent = await context.bot.send_message(
                 chat_id=chat.id,
                 text=(
                     "Please enable the 'Delete Messages' admin permission for me "
                     "so I can remove links posted by non-admin users."
                 ),
             )
+            schedule_auto_clean(context.bot, chat.id, sent.message_id)
         elif old_status != ChatMember.ADMINISTRATOR:
-            await context.bot.send_message(
+            sent = await context.bot.send_message(
                 chat_id=chat.id,
                 text="Anti-Link protection is active! Links posted by non-admins will be removed immediately.",
             )
+            schedule_auto_clean(context.bot, chat.id, sent.message_id)
+
+
+async def clean_welcome_service_message(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Auto-clean Telegram join/welcome service messages after 5 minutes."""
+    chat = update.effective_chat
+    msg = update.effective_message
+    if not chat or not msg or chat.type not in ("group", "supergroup"):
+        return
+
+    if not await bot_can_delete(chat.id, context):
+        return
+
+    schedule_auto_clean(context.bot, chat.id, msg.message_id)
+    logger.info(
+        "Scheduled 5-minute auto-clean for welcome message %s in chat %s",
+        msg.message_id,
+        chat.id,
+    )
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -261,6 +303,12 @@ def main() -> None:
     )
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("status", status_command))
+    app.add_handler(
+        MessageHandler(
+            filters.ChatType.GROUPS & filters.StatusUpdate.NEW_CHAT_MEMBERS,
+            clean_welcome_service_message,
+        )
+    )
     app.add_handler(
         MessageHandler(
             filters.ChatType.GROUPS & ~filters.COMMAND,
