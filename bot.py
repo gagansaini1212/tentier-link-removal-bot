@@ -13,6 +13,7 @@ from telegram import (
     Update,
 )
 from telegram.ext import (
+    Application,
     ApplicationBuilder,
     ChatMemberHandler,
     CommandHandler,
@@ -295,9 +296,11 @@ async def moderate_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
 
 
-def main() -> None:
-    token = load_token()
-    app = ApplicationBuilder().token(token).build()
+def build_application(token: str, *, webhook: bool = False) -> Application:
+    builder = ApplicationBuilder().token(token)
+    if webhook:
+        builder = builder.updater(None)
+    app = builder.build()
     app.add_handler(
         ChatMemberHandler(handle_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER)
     )
@@ -315,7 +318,12 @@ def main() -> None:
             moderate_message,
         )
     )
+    return app
 
+
+def main() -> None:
+    token = load_token()
+    app = build_application(token, webhook=False)
     logger.info("Anti-Link bot is running (polling)...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
